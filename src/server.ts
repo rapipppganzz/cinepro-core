@@ -1,119 +1,79 @@
-import { OMSSServer } from '@omss/framework';
-import 'dotenv/config';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import { knownThirdPartyProxies } from './thirdPartyProxies.js';
-import { streamPatterns } from './streamPatterns.js';
+import express from 'express';
+import cors from 'cors';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const app = express();
+app.use(cors());
 
-async function main() {
-    const server = new OMSSServer({
-        name: 'CinePro',
-        version: '1.0.0',
+// --- PROVIDER VIDSRC (Bawaan CinePro) ---
+// Kita nembak API internal VidSrc langsung
+async function scrapeVidSrc(tmdbId: string, type: 'movie' | 'tv' = 'movie', season = 1, ep = 1) {
+  try {
+    const url = type === 'movie' 
+      ? `https://vidsrc.to/embed/movie/${tmdbId}`
+      : `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${ep}`;
 
-        // Network
-        host: process.env.HOST ?? 'localhost',
-        port: Number(process.env.PORT ?? 3000),
-        publicUrl: process.env.PUBLIC_URL,
-
-        // Cache (memory for dev, Redis for prod)
-        cache: {
-            type: (process.env.CACHE_TYPE as 'memory' | 'redis') ?? 'memory',
-            ttl: {
-                sources: 60 * 60,
-                subtitles: 60 * 60 * 24
-            },
-            redis: {
-                host: process.env.REDIS_HOST ?? 'localhost',
-                port: Number(process.env.REDIS_PORT ?? 6379),
-                password: process.env.REDIS_PASSWORD
-            }
-        },
-
-        // TMDB
-        tmdb: {
-            apiKey: process.env.TMDB_API_KEY!,
-            cacheTTL: 24 * 60 * 60 // 24h
-        },
-
-        // Third Party Proxy removal
-        proxyConfig: {
-            knownThirdPartyProxies: knownThirdPartyProxies,
-            streamPatterns
-        },
-
-        cors: {
-            origin: process.env.CORS_ORIGIN ?? '*',
-            methods: ['GET', 'OPTIONS'],
-            allowedHeaders: ['Content-Type', 'Authorization'],
-            exposedHeaders: ['Content-Range', 'Accept-Ranges', 'ETag'],
-            preflightContinue: false,
-            optionsSuccessStatus: 204
-        },
-
-        stremio: {
-            // exposes a stremio addon on /stremio/manifest.json
-            enableNativeAddon: process.env.STREMIO_ADDON === 'true',
-            // you can your own custom stremio addons as sources into cinepro.
-            stremioAddons: []
-            /*
-            stremioAddons: [
-                {
-                    id: 'some-unique-id',
-                    url: 'https://example.com/manifest.json',
-                    enabled: true
-                }
-            ]
-            */
-        },
-
-        // MCP for AI agents
-        mcp: {
-            enabled: process.env.MCP_ENABLED === 'true'
-        }
+    // 1. Ambil halaman HTML VidSrc
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://vidsrc.to/"
+      }
     });
+    
+    const html = await res.text();
 
-    // Register providers
-    const registry = server.getRegistry();
-    await registry.discoverProviders(path.join(__dirname, './providers/'));
+    // 2. Ekstrak ID data (VidSrc suka sembunyiin ID di data-attribute)
+    const match = html.match(/data-id="([^"]+)"/);
+    if (!match) return null;
+    const dataId = match[1];
 
-    await server.start();
+    // 3. Tembak API internal VidSrc buat dapetin link .m3u8
+    const apiRes = await fetch(`https://vidsrc.to/ajax/embed/source/${dataId}`, {
+       headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": url
+       }
+    });
+    const apiData = await apiRes.json();
+    
+    if (!apiData.result || !apiData.result.url) return null;
+    
+    // 4. Decode link (VidSrc suka nge-encode link-nya pakai base64)
+    const m3u8Url = Buffer.from(apiData.result.url, 'base64').toString('utf-8');
+    return m3u8Url;
 
-    const publicUrl =
-        process.env.PUBLIC_URL ??
-        `http://${process.env.HOST ?? 'localhost'}:${process.env.PORT ?? 3000}`;
-
-    const uiUrl = `https://ui.cinepro.cc/?omssurl=${encodeURIComponent(publicUrl)}`;
-
-    const title = '🚀 CinePro/ui is in public testing';
-    const contrib =
-        '🤝 We are looking for contributors to improve and develop!';
-    const repo = 'Contribute: https://github.com/cinepro-org/ui';
-    const tryIt = `🌐 Try it out: ${uiUrl} !`;
-    const note =
-        'You will need to give the website "access to local applications" that it works.';
-
-    const lines = [title, '', repo, '', contrib, '', tryIt, '', note];
-
-    // compute box width based on longest line
-    const width = Math.max(...lines.map((l) => l.length)) + 2;
-
-    const borderTop = '╭' + '─'.repeat(width) + '╮';
-    const borderBottom = '╰' + '─'.repeat(width) + '╯';
-
-    const pad = (line: string) => '│ ' + line.padEnd(width - 2, ' ') + ' │';
-
-    console.log(`
-================== CINEPRO BETA ANNOUNCEMENT ==================
-
-${borderTop}
-${lines.map(pad).join('\n')}
-${borderBottom}
-`);
+  } catch (e) {
+    console.error("VidSrc Error:", e);
+    return null;
+  }
 }
 
-main().catch(() => {
-    process.exit(1);
+// --- ROUTE API ---
+app.get('/v1/movies/:id', async (req, res) => {
+  const tmdbId = req.params.id;
+  const m3u8 = await scrapeVidSrc(tmdbId, 'movie');
+  
+  if (!m3u8) {
+    return res.status(404).json({ error: "No sources found", provider: "VidSrc" });
+  }
+
+  res.json({
+    sources: [{ url: m3u8, quality: "1080p", provider: "VidSrc" }]
+  });
 });
+
+app.get('/v1/tv/:id/seasons/:s/episodes/:e', async (req, res) => {
+  const { id, s, e } = req.params;
+  const m3u8 = await scrapeVidSrc(id, 'tv', parseInt(s), parseInt(e));
+  
+  if (!m3u8) {
+    return res.status(404).json({ error: "No sources found", provider: "VidSrc" });
+  }
+
+  res.json({
+    sources: [{ url: m3u8, quality: "1080p", provider: "VidSrc" }]
+  });
+});
+
+// Export buat Vercel
+export default app;
