@@ -1,24 +1,15 @@
 {
   "version": 2,
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-  "functions": {
-    "dist/server.js": {
-      "memory": 1024,
-      "maxDuration": 60
+  "builds": [
+    {
+      "src": "server.ts",
+      "use": "@vercel/node"
     }
-  },
+  ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "dist/server.js"
+      "dest": "server.ts"
     }
-  ],
-  "env": {
-    "NODE_ENV": "production",
-    "CACHE_TYPE": "memory",
-    "STREMIO_ADDON": "true",
-    "CORS_ORIGIN": "*",
-    "MCP_ENABLED": "true"
-  }
+  ]
 }
